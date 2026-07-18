@@ -32,6 +32,41 @@ fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
     }
 }
 
+/// Resolves a caller-supplied language NAME (not a file extension) directly
+/// to a grammar. Exists because plugkit-core's own lang_for_ext (the
+/// gm-side caller) returns a distinct name per grammar variant -- notably
+/// "tsx" for .tsx files, disambiguated from "typescript" for plain .ts,
+/// even though this plugin's own ext table groups both under the
+/// "typescript" display name. Accepting both naming conventions here (verb
+/// body can carry "ext" OR "lang") means the two repos' ABIs don't have to
+/// be edited in lockstep -- a caller migrated independently still resolves
+/// correctly against whichever names it already sends.
+fn lang_by_name(name: &str) -> Option<Language> {
+    match name {
+        "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "c" | "glsl" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "json" => Some(tree_sitter_json::LANGUAGE.into()),
+        "html" => Some(tree_sitter_html::LANGUAGE.into()),
+        "css" => Some(tree_sitter_css::LANGUAGE.into()),
+        "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
+        "markdown" => Some(tree_sitter_md::LANGUAGE.into()),
+        "powershell" => Some(tree_sitter_powershell::LANGUAGE.into()),
+        "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        "haskell" => Some(tree_sitter_haskell::LANGUAGE.into()),
+        "julia" => Some(tree_sitter_julia::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
 const CHUNK_NODE_TYPES: &[&str] = &[
     "function_declaration",
     "function_definition",
@@ -144,13 +179,30 @@ pub fn handle_lang_for_ext(body: &serde_json::Value) -> u64 {
     }
 }
 
-/// verb "parse": {"ext": ".rs", "source": "..."} -> {"ok": true, "lang": "rust", "chunks": [{kind,name,line_start,line_end,body}, ...]}
-/// Oversized-chunk splitting is applied unconditionally -- the caller never
-/// needs to know about the threshold, it always gets storage-ready chunks.
+/// verb "parse": accepts EITHER {"ext": ".rs", "source": "..."} (file
+/// extension, resolved via lang_for_ext) OR {"lang": "rust", "source": "..."}
+/// (an explicit language name, resolved via lang_by_name) -- "lang" is tried
+/// first when both/either is present, since a caller sending an explicit
+/// language name has already done its own extension resolution and that
+/// name may disambiguate variants ext alone can't (e.g. "tsx" vs
+/// "typescript" for .tsx vs .ts, both grouped under lang_for_ext's single
+/// "typescript" ext-table entry). Returns {"ok":true,"lang":"rust","chunks":[...]}
+/// or {"ok":true,"lang":null,"chunks":[]} when neither resolves -- never an
+/// error envelope for an unrecognized language, since "no chunks for this
+/// file type" is an expected, not exceptional, outcome.
 pub fn handle_parse(body: &serde_json::Value) -> u64 {
     let ext = body.get("ext").and_then(|v| v.as_str()).unwrap_or("");
+    let lang_field = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
     let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
-    let Some((lang_name, lang)) = lang_for_ext(ext) else {
+
+    let resolved = if !lang_field.is_empty() {
+        lang_by_name(lang_field).map(|l| (lang_field, l))
+    } else {
+        None
+    }
+    .or_else(|| lang_for_ext(ext));
+
+    let Some((lang_name, lang)) = resolved else {
         return return_json(serde_json::json!({"ok": true, "lang": null, "chunks": []}));
     };
 
