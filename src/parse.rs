@@ -67,6 +67,14 @@ fn lang_by_name(name: &str) -> Option<Language> {
     }
 }
 
+// Default chunk-node-type filter, used ONLY by the legacy "extract_chunks"
+// verb (kept for callers migrated before this plugin's response shape was
+// corrected -- see handle_parse's doc comment). The "parse" verb itself is
+// policy-free: it returns every node's position/kind/name, no filtering,
+// since baking a "code chunk" concept into a generic tree-sitter plugin
+// contradicts the point of this being a reusable, gm-agnostic plugin -- a
+// future non-gm consumer of agentplug may want every node, or a different
+// filter entirely, and that decision belongs to the caller, not this plugin.
 const CHUNK_NODE_TYPES: &[&str] = &[
     "function_declaration",
     "function_definition",
@@ -84,6 +92,15 @@ const CHUNK_NODE_TYPES: &[&str] = &[
     "section",
 ];
 
+struct Node {
+    kind: String,
+    name: String,
+    start_byte: usize,
+    end_byte: usize,
+    start_row: usize,
+    end_row: usize,
+}
+
 struct Chunk {
     kind: String,
     name: String,
@@ -92,6 +109,50 @@ struct Chunk {
     body: String,
 }
 
+/// Policy-free walk: every node in the tree, no filtering. This is what the
+/// "parse" verb returns -- callers (e.g. plugkit-core's code_index.rs)
+/// apply their own CHUNK_NODE_TYPES-equivalent filter over the result.
+fn walk_all_nodes(source: &str, lang: Language) -> Vec<Node> {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return Vec::new();
+    }
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let src_bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let start_byte = node.start_byte();
+        let end_byte = node.end_byte().min(src_bytes.len());
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| String::from_utf8_lossy(&src_bytes[n.start_byte()..n.end_byte().min(src_bytes.len())]).into_owned())
+            .unwrap_or_default();
+        out.push(Node {
+            kind: node.kind().to_string(),
+            name,
+            start_byte,
+            end_byte,
+            start_row: node.start_position().row,
+            end_row: node.end_position().row,
+        });
+        for i in 0..node.child_count() as u32 {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Legacy chunk-extraction walk (CHUNK_NODE_TYPES-filtered, early-exit on
+/// match rather than descending into a matched node's children) -- kept
+/// behind the separate "extract_chunks" verb only, for backward
+/// compatibility with any caller still expecting this plugin's original
+/// (policy-baked) response shape.
 fn extract_chunks(source: &str, lang: Language) -> Vec<Chunk> {
     let mut parser = Parser::new();
     if parser.set_language(&lang).is_err() {
@@ -179,30 +240,66 @@ pub fn handle_lang_for_ext(body: &serde_json::Value) -> u64 {
     }
 }
 
+fn resolve_lang<'a>(ext: &str, lang_field: &'a str) -> Option<(&'a str, Language)>
+where
+    'static: 'a,
+{
+    if !lang_field.is_empty() {
+        if let Some(l) = lang_by_name(lang_field) {
+            return Some((lang_field, l));
+        }
+    }
+    lang_for_ext(ext).map(|(name, l)| (name, l))
+}
+
 /// verb "parse": accepts EITHER {"ext": ".rs", "source": "..."} (file
 /// extension, resolved via lang_for_ext) OR {"lang": "rust", "source": "..."}
 /// (an explicit language name, resolved via lang_by_name) -- "lang" is tried
-/// first when both/either is present, since a caller sending an explicit
-/// language name has already done its own extension resolution and that
-/// name may disambiguate variants ext alone can't (e.g. "tsx" vs
-/// "typescript" for .tsx vs .ts, both grouped under lang_for_ext's single
-/// "typescript" ext-table entry). Returns {"ok":true,"lang":"rust","chunks":[...]}
-/// or {"ok":true,"lang":null,"chunks":[]} when neither resolves -- never an
-/// error envelope for an unrecognized language, since "no chunks for this
-/// file type" is an expected, not exceptional, outcome.
+/// first when present, since an explicit language name may disambiguate
+/// variants ext alone can't (e.g. "tsx" vs "typescript" for .tsx vs .ts,
+/// both grouped under lang_for_ext's single "typescript" ext-table entry).
+/// Returns {"ok":true,"lang":"rust","nodes":[{kind,name,start_byte,end_byte,
+/// start_row,end_row}, ...]} -- POLICY-FREE, every node in the tree, no
+/// chunk-type filtering, no oversized-body splitting. This plugin doesn't
+/// know what a "code chunk" is; that's the caller's concept. Returns
+/// {"ok":true,"lang":null,"nodes":[]} when neither ext nor lang resolves --
+/// never an error envelope, since "no grammar for this input" is expected,
+/// not exceptional.
 pub fn handle_parse(body: &serde_json::Value) -> u64 {
     let ext = body.get("ext").and_then(|v| v.as_str()).unwrap_or("");
     let lang_field = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
     let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
 
-    let resolved = if !lang_field.is_empty() {
-        lang_by_name(lang_field).map(|l| (lang_field, l))
-    } else {
-        None
-    }
-    .or_else(|| lang_for_ext(ext));
+    let Some((lang_name, lang)) = resolve_lang(ext, lang_field) else {
+        return return_json(serde_json::json!({"ok": true, "lang": null, "nodes": []}));
+    };
 
-    let Some((lang_name, lang)) = resolved else {
+    let nodes = walk_all_nodes(source, lang);
+    let json_nodes: Vec<serde_json::Value> = nodes
+        .into_iter()
+        .map(|n| {
+            serde_json::json!({
+                "kind": n.kind, "name": n.name,
+                "start_byte": n.start_byte, "end_byte": n.end_byte,
+                "start_row": n.start_row, "end_row": n.end_row,
+            })
+        })
+        .collect();
+    return_json(serde_json::json!({"ok": true, "lang": lang_name, "nodes": json_nodes}))
+}
+
+/// verb "extract_chunks": legacy policy-baked shape (CHUNK_NODE_TYPES
+/// filter + oversized-body splitting applied server-side), kept for any
+/// caller still expecting this plugin's original response shape rather
+/// than "parse"'s policy-free node list. New callers should prefer "parse"
+/// and apply their own filtering, matching how plugkit-core's own
+/// code_index.rs was actually written.
+pub fn handle_extract_chunks(body: &serde_json::Value) -> u64 {
+    let ext = body.get("ext").and_then(|v| v.as_str()).unwrap_or("");
+    let lang_field = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
+    let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+    let Some((lang_name, lang)) = resolve_lang(ext, lang_field) else {
         return return_json(serde_json::json!({"ok": true, "lang": null, "chunks": []}));
     };
 

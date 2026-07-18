@@ -53,6 +53,7 @@ pub extern "C" fn plugin_call(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_
 
     match verb.as_str() {
         "parse" => crate::parse::handle_parse(&body),
+        "extract_chunks" => crate::parse::handle_extract_chunks(&body),
         "lang_for_ext" => crate::parse::handle_lang_for_ext(&body),
         _ => return_json(serde_json::json!({"ok": false, "error": "unknown_verb", "verb": verb})),
     }
