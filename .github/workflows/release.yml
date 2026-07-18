@@ -33,10 +33,18 @@ jobs:
           echo "WASI_SDK_PATH=$PWD/wasi-sdk-24.0-x86_64-linux" >> "$GITHUB_ENV"
 
       - name: Build
+        # -j 2: 18+ tree-sitter grammars each compile a real C parser.c via
+        # cc-rs, several with large generated tables (cpp/typescript
+        # especially) -- unconstrained cargo parallelism spawns clang for
+        # every grammar at once, which OOM-killed the job (bare exit code
+        # 143/SIGTERM mid-compile, no compiler error, live-witnessed on
+        # GitHub's standard 7GB runner) before this fix. Capping concurrent
+        # compile units trades wall-clock time for staying under the
+        # runner's real memory ceiling.
         run: |
           export CC_wasm32_wasip1="$WASI_SDK_PATH/bin/clang"
           export CFLAGS_wasm32_wasip1="--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
-          cargo build --release --target wasm32-wasip1
+          cargo build --release --target wasm32-wasip1 -j 2
 
       - name: Read version
         id: ver
