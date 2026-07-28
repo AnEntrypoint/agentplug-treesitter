@@ -14,58 +14,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install WASI SDK (needed by tree-sitter grammars' C parser.c sources)
-        run: |
-          curl -L -o wasi-sdk.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
-          tar xzf wasi-sdk.tar.gz
-          echo "WASI_SDK_PATH=$PWD/wasi-sdk-24.0-x86_64-linux" >> "$GITHUB_ENV"
-
-      - name: Build
-        # -j 2: 18+ tree-sitter grammars each compile a real C parser.c via
-        # cc-rs, several with large generated tables (cpp/typescript
-        # especially) -- unconstrained cargo parallelism spawns clang for
-        # every grammar at once, which OOM-killed the job (bare exit code
-        # 143/SIGTERM mid-compile, no compiler error, live-witnessed on
-        # GitHub's standard 7GB runner) before this fix. Capping concurrent
-        # compile units trades wall-clock time for staying under the
-        # runner's real memory ceiling.
-        run: |
-          export CC_wasm32_wasip1="$WASI_SDK_PATH/bin/clang"
-          export CFLAGS_wasm32_wasip1="--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
-          cargo build --release --target wasm32-wasip1 -j 2
-
-      - name: Read version
-        id: ver
-        run: echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *\"//;s/\"//')" >> "$GITHUB_OUTPUT"
-
-      - name: Stage release assets with checksum
-        run: |
-          mkdir -p release-assets
-          cp target/wasm32-wasip1/release/agentplug_treesitter.wasm release-assets/treesitter.wasm
-          sha256sum release-assets/treesitter.wasm | sed 's/ \*/  /' > release-assets/treesitter.wasm.sha256
-
-      - name: Publish to agentplug-treesitter-bin Release
-        env:
-          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
-          VER: ${{ steps.ver.outputs.version }}
-        run: |
-          set -e
-          if ! gh release view "v$VER" --repo AnEntrypoint/agentplug-treesitter-bin >/dev/null 2>&1; then
-            gh release create "v$VER" \
-              --repo AnEntrypoint/agentplug-treesitter-bin \
-              --title "agentplug-treesitter v$VER" \
-              --notes "Multi-language tree-sitter parse agentplug plugin, auto-published at $GITHUB_SHA"
-          fi
-          gh release upload "v$VER" --repo AnEntrypoint/agentplug-treesitter-bin --clobber release-assets/*
+  release:
+    uses: AnEntrypoint/rs-plugkit/.github/workflows/wasm-plugin-release.yml@main
+    with:
+      wasm_artifact_name: agentplug_treesitter.wasm
+      published_asset_basename: treesitter
+      release_repo: AnEntrypoint/agentplug-treesitter-bin
+      release_title_prefix: agentplug-treesitter
+      pre_build_steps: |
+        curl -L -o wasi-sdk.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
+        tar xzf wasi-sdk.tar.gz
+        echo "WASI_SDK_PATH=$PWD/wasi-sdk-24.0-x86_64-linux" >> "$GITHUB_ENV"
+      build_env: |
+        export CC_wasm32_wasip1="$WASI_SDK_PATH/bin/clang"
+        export CFLAGS_wasm32_wasip1="--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
+      build_command: cargo build --release --target wasm32-wasip1 -j 2
+    secrets:
+      publisher_token: ${{ secrets.PUBLISHER_TOKEN }}
