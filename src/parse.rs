@@ -153,7 +153,7 @@ fn walk_all_nodes(source: &str, lang: Language) -> Vec<Node> {
 /// behind the separate "extract_chunks" verb only, for backward
 /// compatibility with any caller still expecting this plugin's original
 /// (policy-baked) response shape.
-fn extract_chunks(source: &str, lang: Language) -> Vec<Chunk> {
+fn extract_chunks_with(source: &str, lang: Language, extra_node_types: &[String]) -> Vec<Chunk> {
     let mut parser = Parser::new();
     if parser.set_language(&lang).is_err() {
         return Vec::new();
@@ -167,7 +167,7 @@ fn extract_chunks(source: &str, lang: Language) -> Vec<Chunk> {
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        if CHUNK_NODE_TYPES.contains(&kind) {
+        if CHUNK_NODE_TYPES.contains(&kind) || extra_node_types.iter().any(|t| t == kind) {
             let start = node.start_byte();
             let end = node.end_byte().min(src_bytes.len());
             if end > start {
@@ -303,7 +303,17 @@ pub fn handle_extract_chunks(body: &serde_json::Value) -> u64 {
         return return_json(serde_json::json!({"ok": true, "lang": null, "chunks": []}));
     };
 
-    let mut chunks = extract_chunks(source, lang);
+    // Additive, never replacing: a caller naming node types for a grammar this
+    // build does not special-case gets them chunked alongside the builtins,
+    // rather than having to fork the list. Replacing the builtins instead
+    // would silently stop chunking every language the caller did not enumerate.
+    let extra_node_types: Vec<String> = body
+        .get("extra_node_types")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let mut chunks = extract_chunks_with(source, lang, &extra_node_types);
     if chunks.is_empty() && lang_name == "markdown" && !source.trim().is_empty() {
         let whole = source.chars().take(4000).collect::<String>();
         let line_end = source.lines().count().max(1);
