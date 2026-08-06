@@ -1,5 +1,6 @@
 /target
 Cargo.lock
+*.stackdump
 
 # >>> plugkit managed
 .gm/exec-spool/
