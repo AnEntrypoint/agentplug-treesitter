@@ -48,16 +48,7 @@ fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
     }
 }
 
-/// Resolves a caller-supplied language NAME (not a file extension) directly
-/// to a grammar. Exists because plugkit-core's own lang_for_ext (the
-/// gm-side caller) returns a distinct name per grammar variant -- notably
-/// "tsx" for .tsx files, disambiguated from "typescript" for plain .ts,
-/// even though this plugin's own ext table groups both under the
-/// "typescript" display name. Accepting both naming conventions here (verb
-/// body can carry "ext" OR "lang") means the two repos' ABIs don't have to
-/// be edited in lockstep -- a caller migrated independently still resolves
-/// correctly against whichever names it already sends.
-fn lang_by_name(name: &str) -> Option<Language> {
+fn lang_by_explicit_variant_name(name: &str) -> Option<Language> {
     match name {
         "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
@@ -99,15 +90,7 @@ fn lang_by_name(name: &str) -> Option<Language> {
     }
 }
 
-// Default chunk-node-type filter, used ONLY by the legacy "extract_chunks"
-// verb (kept for callers migrated before this plugin's response shape was
-// corrected -- see handle_parse's doc comment). The "parse" verb itself is
-// policy-free: it returns every node's position/kind/name, no filtering,
-// since baking a "code chunk" concept into a generic tree-sitter plugin
-// contradicts the point of this being a reusable, gm-agnostic plugin -- a
-// future non-gm consumer of agentplug may want every node, or a different
-// filter entirely, and that decision belongs to the caller, not this plugin.
-const CHUNK_NODE_TYPES: &[&str] = &[
+const LEGACY_EXTRACT_CHUNKS_DEFAULT_NODE_TYPES: &[&str] = &[
     "function_declaration",
     "function_definition",
     "function_item",
@@ -141,10 +124,7 @@ struct Chunk {
     body: String,
 }
 
-/// Policy-free walk: every node in the tree, no filtering. This is what the
-/// "parse" verb returns -- callers (e.g. plugkit-core's code_index.rs)
-/// apply their own CHUNK_NODE_TYPES-equivalent filter over the result.
-fn walk_all_nodes(source: &str, lang: Language) -> Vec<Node> {
+fn walk_every_unfiltered_node(source: &str, lang: Language) -> Vec<Node> {
     let mut parser = Parser::new();
     if parser.set_language(&lang).is_err() {
         return Vec::new();
@@ -180,12 +160,7 @@ fn walk_all_nodes(source: &str, lang: Language) -> Vec<Node> {
     out
 }
 
-/// Legacy chunk-extraction walk (CHUNK_NODE_TYPES-filtered, early-exit on
-/// match rather than descending into a matched node's children) -- kept
-/// behind the separate "extract_chunks" verb only, for backward
-/// compatibility with any caller still expecting this plugin's original
-/// (policy-baked) response shape.
-fn extract_chunks_with(source: &str, lang: Language, extra_node_types: &[String]) -> Vec<Chunk> {
+fn extract_chunks_filtered_by_node_type(source: &str, lang: Language, extra_node_types: &[String]) -> Vec<Chunk> {
     let mut parser = Parser::new();
     if parser.set_language(&lang).is_err() {
         return Vec::new();
@@ -199,7 +174,7 @@ fn extract_chunks_with(source: &str, lang: Language, extra_node_types: &[String]
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        if CHUNK_NODE_TYPES.contains(&kind) || extra_node_types.iter().any(|t| t == kind) {
+        if LEGACY_EXTRACT_CHUNKS_DEFAULT_NODE_TYPES.contains(&kind) || extra_node_types.iter().any(|t| t == kind) {
             let start = node.start_byte();
             let end = node.end_byte().min(src_bytes.len());
             if end > start {
@@ -223,14 +198,10 @@ fn extract_chunks_with(source: &str, lang: Language, extra_node_types: &[String]
     out
 }
 
-/// Splits an oversized chunk's body into overlapping sub-chunks -- ported
-/// verbatim from rs-plugkit's code_index.rs (same threshold/overlap
-/// constants), since a caller (gm's own indexing plugin) needs this applied
-/// BEFORE its own storage-side truncation, same ordering as the original.
 const OVERSIZED_CHUNK_SPLIT_THRESHOLD: usize = 8192;
 const OVERSIZED_CHUNK_OVERLAP: usize = 800;
 
-fn split_oversized_chunk(c: &Chunk) -> Vec<Chunk> {
+fn split_oversized_chunk_into_overlapping_subchunks(c: &Chunk) -> Vec<Chunk> {
     if c.body.len() <= OVERSIZED_CHUNK_SPLIT_THRESHOLD {
         return vec![Chunk { kind: c.kind.clone(), name: c.name.clone(), line_start: c.line_start, line_end: c.line_end, body: c.body.clone() }];
     }
@@ -277,27 +248,14 @@ where
     'static: 'a,
 {
     if !lang_field.is_empty() {
-        if let Some(l) = lang_by_name(lang_field) {
+        if let Some(l) = lang_by_explicit_variant_name(lang_field) {
             return Some((lang_field, l));
         }
     }
     lang_for_ext(ext).map(|(name, l)| (name, l))
 }
 
-/// verb "parse": accepts EITHER {"ext": ".rs", "source": "..."} (file
-/// extension, resolved via lang_for_ext) OR {"lang": "rust", "source": "..."}
-/// (an explicit language name, resolved via lang_by_name) -- "lang" is tried
-/// first when present, since an explicit language name may disambiguate
-/// variants ext alone can't (e.g. "tsx" vs "typescript" for .tsx vs .ts,
-/// both grouped under lang_for_ext's single "typescript" ext-table entry).
-/// Returns {"ok":true,"lang":"rust","nodes":[{kind,name,start_byte,end_byte,
-/// start_row,end_row}, ...]} -- POLICY-FREE, every node in the tree, no
-/// chunk-type filtering, no oversized-body splitting. This plugin doesn't
-/// know what a "code chunk" is; that's the caller's concept. Returns
-/// {"ok":true,"lang":null,"nodes":[]} when neither ext nor lang resolves --
-/// never an error envelope, since "no grammar for this input" is expected,
-/// not exceptional.
-pub fn handle_parse(body: &serde_json::Value) -> u64 {
+pub fn handle_parse_unfiltered_nodes_by_ext_or_lang(body: &serde_json::Value) -> u64 {
     let ext = body.get("ext").and_then(|v| v.as_str()).unwrap_or("");
     let lang_field = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
     let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
@@ -306,7 +264,7 @@ pub fn handle_parse(body: &serde_json::Value) -> u64 {
         return return_json(serde_json::json!({"ok": true, "lang": null, "nodes": []}));
     };
 
-    let nodes = walk_all_nodes(source, lang);
+    let nodes = walk_every_unfiltered_node(source, lang);
     let json_nodes: Vec<serde_json::Value> = nodes
         .into_iter()
         .map(|n| {
@@ -320,13 +278,7 @@ pub fn handle_parse(body: &serde_json::Value) -> u64 {
     return_json(serde_json::json!({"ok": true, "lang": lang_name, "nodes": json_nodes}))
 }
 
-/// verb "extract_chunks": legacy policy-baked shape (CHUNK_NODE_TYPES
-/// filter + oversized-body splitting applied server-side), kept for any
-/// caller still expecting this plugin's original response shape rather
-/// than "parse"'s policy-free node list. New callers should prefer "parse"
-/// and apply their own filtering, matching how plugkit-core's own
-/// code_index.rs was actually written.
-pub fn handle_extract_chunks(body: &serde_json::Value) -> u64 {
+pub fn handle_extract_chunks_legacy_filtered_and_split(body: &serde_json::Value) -> u64 {
     let ext = body.get("ext").and_then(|v| v.as_str()).unwrap_or("");
     let lang_field = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
     let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
@@ -335,17 +287,13 @@ pub fn handle_extract_chunks(body: &serde_json::Value) -> u64 {
         return return_json(serde_json::json!({"ok": true, "lang": null, "chunks": []}));
     };
 
-    // Additive, never replacing: a caller naming node types for a grammar this
-    // build does not special-case gets them chunked alongside the builtins,
-    // rather than having to fork the list. Replacing the builtins instead
-    // would silently stop chunking every language the caller did not enumerate.
-    let extra_node_types: Vec<String> = body
+    let extra_node_types_added_alongside_builtins: Vec<String> = body
         .get("extra_node_types")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
 
-    let mut chunks = extract_chunks_with(source, lang, &extra_node_types);
+    let mut chunks = extract_chunks_filtered_by_node_type(source, lang, &extra_node_types_added_alongside_builtins);
     if chunks.is_empty() && lang_name == "markdown" && !source.trim().is_empty() {
         let whole = source.chars().take(4000).collect::<String>();
         let line_end = source.lines().count().max(1);
@@ -353,7 +301,7 @@ pub fn handle_extract_chunks(body: &serde_json::Value) -> u64 {
     }
     let needs_split = chunks.iter().any(|c| c.body.len() > OVERSIZED_CHUNK_SPLIT_THRESHOLD);
     if needs_split {
-        chunks = chunks.iter().flat_map(split_oversized_chunk).collect();
+        chunks = chunks.iter().flat_map(split_oversized_chunk_into_overlapping_subchunks).collect();
     }
 
     let json_chunks: Vec<serde_json::Value> = chunks

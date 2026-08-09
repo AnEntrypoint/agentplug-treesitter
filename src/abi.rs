@@ -52,12 +52,9 @@ pub extern "C" fn plugin_call(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_
     let body: serde_json::Value = serde_json::from_str(&body_str).unwrap_or(serde_json::json!({}));
 
     match verb.as_str() {
-        "parse" => crate::parse::handle_parse(&body),
-        "extract_chunks" => crate::parse::handle_extract_chunks(&body),
+        "parse" => crate::parse::handle_parse_unfiltered_nodes_by_ext_or_lang(&body),
+        "extract_chunks" => crate::parse::handle_extract_chunks_legacy_filtered_and_split(&body),
         "lang_for_ext" => crate::parse::handle_lang_for_ext(&body),
-        // Answers "what can you do" without side effects, so a caller can
-        // probe before dispatching instead of discovering a missing verb as
-        // an indistinguishable ok:false at the call site.
         "capabilities" => return_json(serde_json::json!({
             "ok": true,
             "plugin": "treesitter",
