@@ -29,7 +29,5 @@ jobs:
         export CC_wasm32_wasip1="$WASI_SDK_PATH/bin/clang"
         export CFLAGS_wasm32_wasip1="--sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
       build_command: cargo build --release --target wasm32-wasip1 -j 2
-      npm_package_name: agentplug-treesitter-wasm
     secrets:
       publisher_token: ${{ secrets.PUBLISHER_TOKEN }}
-      npm_token: ${{ secrets.NPM_TOKEN }}
