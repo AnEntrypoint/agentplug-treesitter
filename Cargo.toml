@@ -31,7 +31,6 @@ tree-sitter-css = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-md = "0.5"
 
-[target.wasm32-wasip1.dependencies]
 tree-sitter-c-sharp = "0.23.5"
 tree-sitter-haskell = "0.23.1"
 tree-sitter-julia = "0.23.1"
